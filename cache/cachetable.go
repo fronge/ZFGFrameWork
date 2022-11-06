@@ -1,71 +1,75 @@
 package cache
 
 import (
-	"fmt"
-	"log"
 	"sync"
 	"time"
 )
 
-var defaultExpire = time.Minute
+var defaultExpire = time.Second
+var cacheTables = map[string]*CacheTable{}
 
 type CacheTable struct {
 	sync.RWMutex
 	// 缓存名称 每个table就是一个缓存系统
 	name string
 	// 缓存 对象
-	items map[interface{}]*CacheItem
+	items map[string]*CacheItem
 }
 
-func (c *CacheTable) Add(key interface{}, expire time.Duration, value interface{}) *CacheItem {
+func NewCacheTabel(name string) *CacheTable {
+	if cachTable, ok := cacheTables[name]; ok && cachTable != nil {
+		return cachTable
+	}
+	cacheTable := &CacheTable{
+		name:  name,
+		items: map[string]*CacheItem{},
+	}
+	cacheTables[name] = cacheTable
+
+	return cacheTable
+}
+
+func (c *CacheTable) Add(key string, expire time.Duration, value interface{}) {
 	if expire == 0 {
-		log.Printf("未设置时间")
 		expire = defaultExpire
 	}
-	log.Printf("设置删除定时:%v,设置时间:%v", expire, time.Now())
+	// 判断是否存在
+	if item, ok := c.items[key]; ok && item != nil {
+		item.cleanupTimer.Stop()
+	}
+	// 定期删除
 	t := time.AfterFunc(expire, func() {
 		c.DelItem(key)
 	})
-	item := NewCacheItem(key, expire, t, value)
-	c.items[key] = item
-	return item
+
+	// item := NewCacheItem(key, expire, t, value)
+	c.items[key] = NewCacheItem(key, expire, t, value)
+	return
 }
 
-func (c *CacheTable) Value(key interface{}) (*CacheItem, error) {
+func (c *CacheTable) Value(key string) (*CacheItem, error) {
 	if c.items == nil {
 		return nil, ErrorKeyFound
 	}
-	if r, ok := c.items[key]; ok {
-		s := r.cleanupTimer.Stop()
-		if s {
-			fmt.Println("停止删除")
+	if r, ok := c.items[key]; ok && r != nil {
+		if time.Now().After(r.start.Add(r.expireTime)) {
+			return nil, ErrorKeyFound
 		}
-		log.Println("r.expireTime", r.expireTime)
-		log.Printf("重新设置删除定时:%v, 设置时间:%v", r.expireTime, time.Now())
-		r.cleanupTimer = time.AfterFunc(r.expireTime, func() { c.DelItem(key) })
+		if s := r.cleanupTimer.Stop(); s {
+			r.cleanupTimer = time.AfterFunc(r.expireTime, func() { c.DelItem(key) })
+		}
 		return r, nil
 	}
 
 	return nil, ErrorKeyFound
 }
 
-func (c *CacheTable) DelItem(key interface{}) error {
-	log.Printf("执行删除定时:%v", time.Now())
+func (c *CacheTable) DelItem(key string) error {
 	if c.items == nil {
 		return nil
 	}
 	if _, ok := c.items[key]; ok {
 		c.items[key] = nil
-		return nil
-	}
-	return ErrorKeyFound
-}
-
-func (c *CacheTable) SetExpire(key interface{}, t time.Duration) error {
-	if item, ok := c.items[key]; ok {
-		//
-		item.expireTime = t
-		item.cleanupTimer.Reset(item.expireTime)
 		return nil
 	}
 	return ErrorKeyFound
